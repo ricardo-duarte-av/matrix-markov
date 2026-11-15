@@ -103,9 +103,9 @@ Message text is never logged above `debug`, because it may come from an encrypte
 |------:|-----------|
 | 1 | Mostly word salad. |
 | 2 | **Default.** Good mix of coherence and novelty for chat-sized corpora. |
-| 3+ | Very coherent, but it mostly repeats whole messages unless the room has tens of thousands of them. |
+| 3+ | Very coherent, but the bot stays mostly silent until the room has tens of thousands of messages, because almost every candidate would be a copy. |
 
-The generator avoids sending an exact copy of a learned message when it can.
+**Anti-parroting.** The bot never sends a reply that shares too long a run of consecutive words with any single learned message: no more than 70% of the reply's length, and never more than 15 words. This is the approach the markovify library uses. Replies on a topic are grown in both directions from the topic word, using a second chain learned backwards, so they start at a natural sentence beginning instead of in the middle of a message. If no acceptable reply comes out after 50 attempts, the bot stays silent. When it was mentioned or replied to, it reacts instead if it can. Small rooms therefore get fewer replies at first.
 
 ## Tests
 

@@ -2,3 +2,4 @@ config.yaml
 data/
 /markov-bot
 .env
+/cmd/markov-sim/

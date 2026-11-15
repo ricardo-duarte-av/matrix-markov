@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,19 +39,22 @@ func TestRoomsDoNotLeak(t *testing.T) {
 		}
 		return w
 	}
+	// Random messages over a small vocabulary, so word pairs recur with
+	// different followers and novel (non-parroted) replies are possible.
+	r := rand.New(rand.NewPCG(1, 2))
 	sentences := func(words []string, n int) []string {
-		var out []string
-		for i := 0; i < n; i++ {
-			var s []string
-			for j := 0; j < 6+i%5; j++ {
-				s = append(s, words[(i*7+j*3)%len(words)])
+		out := make([]string, n)
+		for i := range out {
+			s := make([]string, 6+r.IntN(6))
+			for j := range s {
+				s[j] = words[r.IntN(len(words))]
 			}
-			out = append(out, strings.Join(s, " "))
+			out[i] = strings.Join(s, " ")
 		}
 		return out
 	}
-	wordsA, wordsB := vocab("alpha", 40), vocab("bravo", 40)
-	seedA, seedB := vocab("seeda", 20), vocab("seedb", 20)
+	wordsA, wordsB := vocab("alpha", 12), vocab("bravo", 12)
+	seedA, seedB := vocab("seeda", 8), vocab("seedb", 8)
 	sendersA := []id.UserID{"@ua1:example.org", "@ua2:example.org", "@ua3:example.org"}
 	sendersB := []id.UserID{"@ub1:example.org", "@ub2:example.org", "@ub3:example.org"}
 	// The resolver knows everybody (as a real state store could, if the
@@ -122,11 +126,12 @@ func TestRoomsDoNotLeak(t *testing.T) {
 	allowedA := allowed(wordsA, seedA, sendersA)
 	allowedB := allowed(wordsB, seedB, sendersB)
 	namesSeen := 0
+	produced := map[id.RoomID]int{}
 	check := func(room id.RoomID, allowed map[string]bool, trigger id.UserID, prompt string) {
 		t.Helper()
 		out := brain.Reply(ctx, room, prompt, trigger)
-		if out == "" {
-			t.Fatalf("room %s produced no reply", room)
+		if out != "" {
+			produced[room]++
 		}
 		if strings.Contains(out, markov.UserPlaceholder) {
 			t.Fatalf("room %s left a placeholder in %q", room, out)
@@ -153,6 +158,11 @@ func TestRoomsDoNotLeak(t *testing.T) {
 		check(roomB, allowedB, sendersB[0], msgsA[i%len(msgsA)])
 		check(roomB, allowedB, sendersB[1], msgsB[i%len(msgsB)])
 	}
+	for _, room := range []id.RoomID{roomA, roomB} {
+		if produced[room] < 1000 {
+			t.Fatalf("room %s produced only %d/2000 replies; test isn't exercising generation", room, produced[room])
+		}
+	}
 	if namesSeen == 0 {
 		t.Fatal("no mention placeholder was ever filled in; test isn't exercising names")
 	}
@@ -175,17 +185,26 @@ func TestForgetRedactedMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustLearn(t, brain, room, "$secret", "@u:example.org", "topsecret topsecret topsecret")
+	// With both messages, "zulu topsecret whiskey" etc. can be generated;
+	// with $secret gone, only a copy of $other remains, which is rejected.
+	mustLearn(t, brain, room, "$secret", "@u:example.org", "zulu topsecret yankee")
+	mustLearn(t, brain, room, "$other", "@u:example.org", "xray topsecret whiskey")
 	mustReact(t, brain, room, "$r1", "$secret", "🤫")
 	mustReact(t, brain, room, "$r2", "$secret", "🤫")
-	if out := brain.Reply(ctx, room, "", ""); !strings.Contains(out, "topsecret") {
-		t.Fatalf("expected the message to be learned, got %q", out)
+	seen := false
+	for i := 0; i < 200 && !seen; i++ {
+		seen = strings.Contains(brain.Reply(ctx, room, "", ""), "zulu")
+	}
+	if !seen {
+		t.Fatal("expected the message to be learned")
 	}
 	if kind, err := brain.Forget(ctx, room, "$secret"); err != nil || kind != "message" {
 		t.Fatalf("Forget = %q, %v", kind, err)
 	}
-	if out := brain.Reply(ctx, room, "", ""); out != "" {
-		t.Fatalf("redacted message still generated: %q", out)
+	for i := 0; i < 200; i++ {
+		if out := brain.Reply(ctx, room, "", ""); strings.Contains(out, "zulu") || strings.Contains(out, "yankee") {
+			t.Fatalf("redacted message still generated: %q", out)
+		}
 	}
 	if _, _, ok := brain.SuggestReaction(room, "topsecret"); ok {
 		t.Fatal("reactions on redacted message still suggested")
