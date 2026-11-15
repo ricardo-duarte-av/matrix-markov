@@ -6,7 +6,7 @@ It's written in Go with [mautrix-go](https://github.com/mautrix/go) and supports
 ## Features
 
 - **Rooms are kept apart.** Each allowed room has its own chain, built only from that room's messages and its own optional seed file. No chain is shared. Messages from rooms that aren't configured are ignored, and invites to them are rejected.
-- **E2EE.** Uses mautrix's crypto helper. The device and its keys are kept in `data/crypto.db`, so restarts reuse the same device.
+- **E2EE.** Uses mautrix's crypto helper. The device and its keys are kept in `data/crypto.db`, so restarts reuse the same device. At startup, and after joining a room, the bot fetches each configured room's full state (members and encryption settings) and starts a new room key, so its encrypted messages reach every member's devices.
 - **Triggers.** The bot answers **as a reply** when it is addressed:
   - it is mentioned (via `m.mentions`, its MXID, display name or localpart)
   - someone replies to one of its messages

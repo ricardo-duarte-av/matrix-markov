@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -82,7 +83,10 @@ func (b *Bot) Run(ctx context.Context) error {
 	b.joinRooms(ctx, rooms)
 
 	syncer := b.cli.Syncer.(*mautrix.DefaultSyncer)
-	syncer.OnSync(b.cli.DontProcessOldEvents)
+	// Note: not cli.DontProcessOldEvents. It skips whole sync responses,
+	// including room state, which left the state store with partial member
+	// lists, so encrypted messages were not shared with most members.
+	syncer.OnSync(dropInitialMessages)
 	syncer.OnEventType(event.StateMember, b.handleMember)
 	syncer.OnEventType(event.EventMessage, b.handleMessage)
 	syncer.OnEventType(event.EventReaction, b.handleReaction)
@@ -175,14 +179,51 @@ func (b *Bot) joinRooms(ctx context.Context, rooms map[id.RoomID]config.RoomSett
 	for roomID := range rooms {
 		if joined[roomID] {
 			b.log.Info().Stringer("room_id", roomID).Bool("learn", rooms[roomID].Learn).Bool("respond", rooms[roomID].Respond).Msg("Watching configured room")
-			continue
-		}
-		if _, err := b.cli.JoinRoomByID(ctx, roomID); err != nil {
+		} else if _, err := b.cli.JoinRoomByID(ctx, roomID); err != nil {
 			b.log.Warn().Err(err).Stringer("room_id", roomID).Msg("Could not join configured room yet (invite the bot)")
+			continue
 		} else {
 			b.log.Info().Stringer("room_id", roomID).Bool("learn", rooms[roomID].Learn).Bool("respond", rooms[roomID].Respond).Msg("Joined configured room")
 		}
+		b.refreshRoom(ctx, roomID)
 	}
+}
+
+// refreshRoom fetches a room's full state (complete member list, encryption
+// settings) into the state store, then discards the room's outbound Megolm
+// session so the next message uses a new one shared with every member's
+// devices. Without a complete member list, members missing from it can't
+// decrypt the bot's messages (and later get m.unauthorised on key requests).
+func (b *Bot) refreshRoom(ctx context.Context, roomID id.RoomID) {
+	log := b.log.With().Stringer("room_id", roomID).Logger()
+	if _, err := b.cli.State(ctx, roomID); err != nil {
+		log.Warn().Err(err).Msg("Failed to fetch room state; encrypted messages may not reach every member")
+		return
+	}
+	if err := b.crypto.Machine().CryptoStore.RemoveOutboundGroupSession(ctx, roomID); err != nil {
+		log.Warn().Err(err).Msg("Failed to rotate outbound group session")
+	}
+	members, _ := b.cli.StateStore.GetRoomJoinedOrInvitedMembers(ctx, roomID)
+	encrypted, _ := b.cli.StateStore.IsEncrypted(ctx, roomID)
+	log.Info().Int("members", len(members)).Bool("encrypted", encrypted).Msg("Refreshed room state")
+}
+
+// dropInitialMessages is a sync handler that removes message events (but
+// keeps state events) from the very first sync's timelines: a new device
+// can't decrypt that history anyway. All room state is still processed, so
+// the state store gets complete member lists and encryption settings.
+// Later syncs are processed in full; old messages in them are learned but
+// not answered (see replyMaxAge).
+func dropInitialMessages(_ context.Context, resp *mautrix.RespSync, since string) bool {
+	if since != "" {
+		return true
+	}
+	for _, room := range resp.Rooms.Join {
+		room.Timeline.Events = slices.DeleteFunc(room.Timeline.Events, func(e *event.Event) bool {
+			return e.StateKey == nil
+		})
+	}
+	return true
 }
 
 func (b *Bot) handleMember(ctx context.Context, evt *event.Event) {
@@ -200,6 +241,7 @@ func (b *Bot) handleMember(ctx context.Context, evt *event.Event) {
 		return
 	}
 	log.Info().Msg("Joined room after invite")
+	b.refreshRoom(ctx, evt.RoomID)
 }
 
 func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
