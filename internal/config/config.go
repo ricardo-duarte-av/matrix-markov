@@ -32,6 +32,10 @@ type Markov struct {
 	Keywords    []string `yaml:"keywords"`
 	SeedFile    string   `yaml:"seed_file"`
 	MaxMessages int      `yaml:"max_messages"`
+	// ReactChance is the probability of reacting when a reaction scores at
+	// least ReactThreshold (0..1).
+	ReactChance    float64 `yaml:"react_chance"`
+	ReactThreshold float64 `yaml:"react_threshold"`
 }
 
 // Room is one allowed room. Pointer fields are optional overrides of Markov.
@@ -42,6 +46,9 @@ type Room struct {
 	ReplyChance *float64  `yaml:"reply_chance"`
 	Keywords    *[]string `yaml:"keywords"`
 	Learn       *bool     `yaml:"learn"`
+
+	ReactChance    *float64 `yaml:"react_chance"`
+	ReactThreshold *float64 `yaml:"react_threshold"`
 }
 
 // RoomSettings is the fully-resolved configuration for one room.
@@ -55,6 +62,9 @@ type RoomSettings struct {
 	Keywords    []string
 	Learn       bool
 	MaxMessages int
+
+	ReactChance    float64
+	ReactThreshold float64
 }
 
 func Load(path string) (*Config, error) {
@@ -72,6 +82,9 @@ func Load(path string) (*Config, error) {
 			MaxWords:    30,
 			ReplyChance: 0.02,
 			MaxMessages: 50000,
+
+			ReactChance:    0.1,
+			ReactThreshold: 0.35,
 		},
 	}
 	if err = yaml.Unmarshal(raw, cfg); err != nil {
@@ -141,6 +154,12 @@ func (c *Config) Validate() error {
 		if s.ReplyChance < 0 || s.ReplyChance > 1 {
 			errs = append(errs, fmt.Errorf("room %s: reply_chance must be between 0 and 1", r.ID))
 		}
+		if s.ReactChance < 0 || s.ReactChance > 1 {
+			errs = append(errs, fmt.Errorf("room %s: react_chance must be between 0 and 1", r.ID))
+		}
+		if s.ReactThreshold < 0 || s.ReactThreshold > 1 {
+			errs = append(errs, fmt.Errorf("room %s: react_threshold must be between 0 and 1", r.ID))
+		}
 		if s.SeedFile != "" {
 			if _, err := os.Stat(s.SeedFile); err != nil {
 				errs = append(errs, fmt.Errorf("room %s: seed_file: %w", r.ID, err))
@@ -162,6 +181,9 @@ func (c *Config) RoomSettings(r Room) RoomSettings {
 		Keywords:    c.Markov.Keywords,
 		Learn:       true,
 		MaxMessages: c.Markov.MaxMessages,
+
+		ReactChance:    c.Markov.ReactChance,
+		ReactThreshold: c.Markov.ReactThreshold,
 	}
 	if r.SeedFile != nil {
 		s.SeedFile = *r.SeedFile
@@ -177,6 +199,12 @@ func (c *Config) RoomSettings(r Room) RoomSettings {
 	}
 	if r.Learn != nil {
 		s.Learn = *r.Learn
+	}
+	if r.ReactChance != nil {
+		s.ReactChance = *r.ReactChance
+	}
+	if r.ReactThreshold != nil {
+		s.ReactThreshold = *r.ReactThreshold
 	}
 	return s
 }

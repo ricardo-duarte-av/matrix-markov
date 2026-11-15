@@ -11,7 +11,7 @@ func rng(seed uint64) *rand.Rand { return rand.New(rand.NewPCG(seed, seed^0x9e37
 func TestCleanStripsFallbackURLsAndMXIDs(t *testing.T) {
 	in := "> <@alice:example.org> old quoted text\n> more\n\nhey @bob:example.org see https://example.com/x and #room:example.org ok"
 	got := Clean(in)
-	want := "hey see and ok"
+	want := "hey " + UserPlaceholder + " see and ok"
 	if got != want {
 		t.Fatalf("Clean = %q, want %q", got, want)
 	}

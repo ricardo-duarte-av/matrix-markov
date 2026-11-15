@@ -20,6 +20,11 @@ markov:
   keywords: ["markov"]           # (room) case-insensitive whole words/phrases that trigger a reply
   seed_file: ""                  # (room) plain-text file loaded into each room's chain at startup
   max_messages: 50000            # per-room stored-message cap, oldest pruned; 0 = unlimited
+  # Reactions are learned from what people react with on messages in the
+  # same room. The bot reacts when the best-matching reaction scores at least
+  # react_threshold (0..1) and a random draw passes react_chance.
+  react_chance: 0.1              # (room)
+  react_threshold: 0.35          # (room)
 
 # Only these rooms are joined, learned from and answered in. Each room has its
 # own chain: text never moves from one room to another.
@@ -30,4 +35,5 @@ rooms:
     order: 2
     reply_chance: 0.1
     keywords: ["markov", "bot"]
-    learn: true                  # false = only talk from the seed file, never learn
+    react_chance: 0.2
+    learn: true                  # false = only talk from the seed file, learn neither messages nor reactions

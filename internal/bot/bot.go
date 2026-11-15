@@ -18,6 +18,7 @@ import (
 	"maunium.net/go/mautrix/id"
 
 	"matrix-markov/internal/config"
+	"matrix-markov/internal/react"
 	"matrix-markov/internal/store"
 )
 
@@ -61,7 +62,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if b.brain, err = NewBrain(ctx, b.store, rooms); err != nil {
+	if b.brain, err = NewBrain(ctx, b.store, b.displayName, rooms); err != nil {
 		return err
 	}
 	for roomID := range rooms {
@@ -74,6 +75,8 @@ func (b *Bot) Run(ctx context.Context) error {
 	syncer.OnSync(b.cli.DontProcessOldEvents)
 	syncer.OnEventType(event.StateMember, b.handleMember)
 	syncer.OnEventType(event.EventMessage, b.handleMessage)
+	syncer.OnEventType(event.EventReaction, b.handleReaction)
+	syncer.OnEventType(event.EventRedaction, b.handleRedaction)
 
 	b.log.Info().Stringer("user_id", b.cli.UserID).Stringer("device_id", b.cli.DeviceID).Msg("Bot is running")
 	err = b.cli.SyncWithContext(ctx)
@@ -202,35 +205,134 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 	log := b.log.With().Stringer("room_id", evt.RoomID).Stringer("event_id", evt.ID).Logger()
 
 	reason := decideTrigger(b.me, msg, b.sent, settings.Keywords, settings.ReplyChance, rand.Float64())
-	body := b.me.stripMention(msg.Body)
+	body := b.me.learnableBody(msg)
 
 	if err := b.brain.Learn(ctx, evt.RoomID, evt.ID, evt.Sender, body, evt.Timestamp); err != nil {
 		log.Error().Err(err).Msg("Failed to learn message")
 	}
 
-	if reason == reasonNone {
-		return
-	}
 	if age := time.Since(time.UnixMilli(evt.Timestamp)); age > replyMaxAge {
-		log.Debug().Dur("age", age).Msg("Not replying to old message")
+		log.Debug().Dur("age", age).Msg("Not reacting to old message")
 		return
 	}
-	text := b.brain.Reply(evt.RoomID, body)
+
+	replied := false
+	if reason != reasonNone {
+		replied = b.reply(ctx, evt, body, reason)
+	}
+
+	// React when a learned reaction fits well enough and the dice agree.
+	// If the bot was addressed but had nothing to say, react instead
+	// whenever it has any suggestion at all.
+	rc, score, ok := b.brain.SuggestReaction(evt.RoomID, body)
+	forced := reason != reasonNone && reason != reasonRandom && !replied
+	if ok && (forced || (score >= settings.ReactThreshold && rand.Float64() < settings.ReactChance)) {
+		if err := b.sendReaction(ctx, evt.RoomID, evt.ID, rc); err != nil {
+			log.Error().Err(err).Msg("Failed to send reaction")
+		} else {
+			log.Debug().Str("key", rc.Key).Float64("score", score).Msg("Reacted")
+		}
+	}
+}
+
+func (b *Bot) reply(ctx context.Context, evt *event.Event, body string, reason triggerReason) bool {
+	log := b.log.With().Stringer("room_id", evt.RoomID).Stringer("event_id", evt.ID).Logger()
+	text := b.brain.Reply(ctx, evt.RoomID, body, evt.Sender)
 	if text == "" {
 		log.Debug().Str("reason", string(reason)).Msg("Nothing to say yet")
-		return
+		return false
 	}
 	content := &event.MessageEventContent{MsgType: event.MsgText, Body: text}
 	if reason != reasonRandom {
-		content.SetReply(evt)
+		content.SetReply(evt) // mentions only the person replied to
 	} else {
-		content.Mentions = &event.Mentions{}
+		content.Mentions = &event.Mentions{} // explicitly mention nobody
 	}
 	resp, err := b.cli.SendMessageEvent(ctx, evt.RoomID, event.EventMessage, content)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to send reply")
-		return
+		return false
 	}
 	b.sent.add(resp.EventID)
 	log.Debug().Str("reason", string(reason)).Msg("Replied")
+	return true
+}
+
+func (b *Bot) handleReaction(ctx context.Context, evt *event.Event) {
+	if _, ok := b.brain.Settings(evt.RoomID); !ok || evt.Sender == b.cli.UserID {
+		return
+	}
+	content := evt.Content.AsReaction()
+	if content == nil || content.RelatesTo.Type != event.RelAnnotation || content.RelatesTo.EventID == "" {
+		return
+	}
+	rc := react.Reaction{Key: content.RelatesTo.Key}
+	if sc, ok := evt.Content.Raw["com.beeper.reaction.shortcode"].(string); ok {
+		rc.Shortcode = sc
+	}
+	if err := b.brain.LearnReaction(ctx, evt.RoomID, evt.ID, content.RelatesTo.EventID, evt.Sender, rc, evt.Timestamp); err != nil {
+		b.log.Error().Err(err).Stringer("room_id", evt.RoomID).Stringer("event_id", evt.ID).Msg("Failed to learn reaction")
+	}
+}
+
+func (b *Bot) handleRedaction(ctx context.Context, evt *event.Event) {
+	if _, ok := b.brain.Settings(evt.RoomID); !ok {
+		return
+	}
+	target := evt.Redacts
+	if c := evt.Content.AsRedaction(); c != nil && c.Redacts != "" {
+		target = c.Redacts
+	}
+	if target == "" {
+		return
+	}
+	forgot, err := b.brain.Forget(ctx, evt.RoomID, target)
+	if err != nil {
+		b.log.Error().Err(err).Stringer("room_id", evt.RoomID).Stringer("redacts", target).Msg("Failed to forget redacted event")
+	} else if forgot {
+		b.log.Debug().Stringer("room_id", evt.RoomID).Stringer("redacts", target).Msg("Forgot redacted event")
+	}
+}
+
+// sendReaction sends an m.reaction. mautrix never encrypts reactions, but
+// keys are arbitrary text from the room, so in encrypted rooms the bot
+// encrypts them itself (m.relates_to stays in cleartext, as the spec requires).
+func (b *Bot) sendReaction(ctx context.Context, roomID id.RoomID, target id.EventID, rc react.Reaction) error {
+	content := map[string]any{
+		"m.relates_to": map[string]any{
+			"rel_type": event.RelAnnotation,
+			"event_id": target,
+			"key":      rc.Key,
+		},
+	}
+	if rc.Shortcode != "" {
+		content["com.beeper.reaction.shortcode"] = rc.Shortcode
+	}
+	encrypted, err := b.cli.StateStore.IsEncrypted(ctx, roomID)
+	if err != nil {
+		return fmt.Errorf("check room encryption: %w", err)
+	}
+	if !encrypted {
+		_, err = b.cli.SendMessageEvent(ctx, roomID, event.EventReaction, content)
+		return err
+	}
+	enc, err := b.crypto.Encrypt(ctx, roomID, event.EventReaction, content)
+	if err != nil {
+		return fmt.Errorf("encrypt reaction: %w", err)
+	}
+	_, err = b.cli.SendMessageEvent(ctx, roomID, event.EventEncrypted, enc)
+	return err
+}
+
+// displayName returns a user's display name in a room, or "" if they aren't
+// currently joined to it.
+func (b *Bot) displayName(ctx context.Context, roomID id.RoomID, userID id.UserID) string {
+	m, err := b.cli.StateStore.GetMember(ctx, roomID, userID)
+	if err != nil || m == nil || m.Membership != event.MembershipJoin {
+		return ""
+	}
+	if m.Displayname != "" {
+		return m.Displayname
+	}
+	return userID.Localpart()
 }

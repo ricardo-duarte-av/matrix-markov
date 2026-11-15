@@ -34,6 +34,7 @@ rooms:
     reply_chance: 0.5
     keywords: []
     learn: false
+    react_chance: 1
 `)
 	cfg, err := Load(p)
 	if err != nil {
@@ -44,6 +45,9 @@ rooms:
 		t.Fatalf("room a defaults wrong: %+v", a)
 	}
 	b := cfg.RoomSettings(cfg.Rooms[1])
+	if a.ReactChance != 0.1 || a.ReactThreshold != 0.35 || b.ReactChance != 1 {
+		t.Fatalf("react settings wrong: a=%+v b=%+v", a, b)
+	}
 	if b.Order != 3 || b.ReplyChance != 0.5 || b.Learn || len(b.Keywords) != 0 || b.SeedFile != filepath.Join(dir, "seed.txt") {
 		t.Fatalf("room b overrides wrong: %+v", b)
 	}
@@ -60,13 +64,14 @@ markov:
 rooms:
   - id: "nope"
     reply_chance: 2
+    react_threshold: -1
     seed_file: missing.txt
 `)
 	_, err := Load(p)
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
-	for _, want := range []string{"homeserver", "username", "password", "pickle_key", "rooms[0].id", "order", "reply_chance", "seed_file"} {
+	for _, want := range []string{"homeserver", "username", "password", "pickle_key", "rooms[0].id", "order", "reply_chance", "react_threshold", "seed_file"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error does not mention %q: %v", want, err)
 		}

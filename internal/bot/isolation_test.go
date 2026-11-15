@@ -12,12 +12,14 @@ import (
 
 	"matrix-markov/internal/config"
 	"matrix-markov/internal/markov"
+	"matrix-markov/internal/react"
 	"matrix-markov/internal/store"
 )
 
-// TestRoomsDoNotLeak feeds two rooms disjoint vocabularies (plus a different
-// seed file each), then generates many replies in each room, including with
-// prompts made of the *other* room's words, and checks that no token from
+// TestRoomsDoNotLeak feeds two rooms disjoint vocabularies, seed files,
+// senders (whose names fill mention placeholders) and reaction keys. It then
+// generates many replies and reaction suggestions in each room, including
+// with prompts made of the *other* room's text, and checks that nothing from
 // the other room ever appears.
 func TestRoomsDoNotLeak(t *testing.T) {
 	ctx := context.Background()
@@ -49,6 +51,12 @@ func TestRoomsDoNotLeak(t *testing.T) {
 	}
 	wordsA, wordsB := vocab("alpha", 40), vocab("bravo", 40)
 	seedA, seedB := vocab("seeda", 20), vocab("seedb", 20)
+	sendersA := []id.UserID{"@ua1:example.org", "@ua2:example.org", "@ua3:example.org"}
+	sendersB := []id.UserID{"@ub1:example.org", "@ub2:example.org", "@ub3:example.org"}
+	// The resolver knows everybody (as a real state store could, if the
+	// same person is in both rooms); isolation must come from the Brain only
+	// asking about the room's own senders.
+	names := func(_ context.Context, _ id.RoomID, u id.UserID) string { return "Name_" + u.Localpart() }
 
 	writeSeed := func(name string, words []string) string {
 		p := filepath.Join(dir, name)
@@ -65,67 +73,135 @@ func TestRoomsDoNotLeak(t *testing.T) {
 		roomB: settings(roomB, writeSeed("b.txt", seedB), 1),
 	}
 
-	// Learn half the messages, then "restart" (rebuild from the DB), then
-	// learn the rest live, so both load paths are covered.
+	// Every 3rd message mentions someone, so placeholders get learned.
 	msgsA, msgsB := sentences(wordsA, 100), sentences(wordsB, 100)
-	brain, err := NewBrain(ctx, st, rooms)
+	for i := 0; i < 100; i += 3 {
+		msgsA[i] = markov.UserPlaceholder + " " + msgsA[i]
+		msgsB[i] = msgsB[i] + " @someone:example.org"
+	}
+
+	// Learn half, "restart" (rebuild from the DB), learn the rest live, so
+	// both load paths are covered.
+	brain, err := NewBrain(ctx, st, names, rooms)
 	if err != nil {
 		t.Fatal(err)
 	}
 	learn := func(br *Brain, from, to int) {
 		for i := from; i < to; i++ {
-			mustLearn(t, br, roomA, fmt.Sprintf("$a%d", i), msgsA[i])
-			mustLearn(t, br, roomB, fmt.Sprintf("$b%d", i), msgsB[i])
+			mustLearn(t, br, roomA, fmt.Sprintf("$a%d", i), sendersA[i%3], msgsA[i])
+			mustLearn(t, br, roomB, fmt.Sprintf("$b%d", i), sendersB[i%3], msgsB[i])
+			// Each room's messages get that room's own reactions.
+			mustReact(t, br, roomA, fmt.Sprintf("$ra%d", i), fmt.Sprintf("$a%d", i), "🅰️")
+			mustReact(t, br, roomB, fmt.Sprintf("$rb%d", i), fmt.Sprintf("$b%d", i), "bravo reaction")
+			// Cross-room attempt: a reaction in room B pointing at a room A message.
+			mustReact(t, br, roomB, fmt.Sprintf("$x%d", i), fmt.Sprintf("$a%d", i), "LEAK")
 		}
 	}
 	learn(brain, 0, 50)
-	if brain, err = NewBrain(ctx, st, rooms); err != nil {
+	if brain, err = NewBrain(ctx, st, names, rooms); err != nil {
 		t.Fatal(err)
 	}
 	learn(brain, 50, 100)
 
 	// A room that isn't allowed must neither learn nor reply.
-	mustLearn(t, brain, "!other:example.org", "$x", "secret words here")
-	if out := brain.Reply("!other:example.org", "secret"); out != "" {
+	mustLearn(t, brain, "!other:example.org", "$x", "@ux:example.org", "secret words here")
+	if out := brain.Reply(ctx, "!other:example.org", "secret", "@ux:example.org"); out != "" {
 		t.Fatalf("unallowed room got a reply: %q", out)
 	}
 
-	allowedA := set(wordsA, seedA)
-	allowedB := set(wordsB, seedB)
-	check := func(room id.RoomID, allowed map[string]bool, prompt string) {
+	allowed := func(words, seed []string, senders []id.UserID) map[string]bool {
+		m := map[string]bool{}
+		for _, w := range append(words, seed...) {
+			m[w], m[w+"."] = true, true // seed sentences end with a period
+		}
+		for _, u := range senders {
+			m[names(ctx, "", u)] = true
+		}
+		return m
+	}
+	allowedA := allowed(wordsA, seedA, sendersA)
+	allowedB := allowed(wordsB, seedB, sendersB)
+	namesSeen := 0
+	check := func(room id.RoomID, allowed map[string]bool, trigger id.UserID, prompt string) {
 		t.Helper()
-		out := brain.Reply(room, prompt)
+		out := brain.Reply(ctx, room, prompt, trigger)
 		if out == "" {
 			t.Fatalf("room %s produced no reply", room)
+		}
+		if strings.Contains(out, markov.UserPlaceholder) {
+			t.Fatalf("room %s left a placeholder in %q", room, out)
 		}
 		for _, w := range markov.Tokenize(out) {
 			if !allowed[w] {
 				t.Fatalf("room %s leaked foreign token %q in %q", room, w, out)
 			}
+			if strings.HasPrefix(w, "Name_") {
+				namesSeen++
+			}
+		}
+		rc, _, ok := brain.SuggestReaction(room, prompt)
+		if ok {
+			want := map[id.RoomID]string{roomA: "🅰️", roomB: "bravo reaction"}[room]
+			if rc.Key != want {
+				t.Fatalf("room %s suggested foreign reaction %q", room, rc.Key)
+			}
 		}
 	}
 	for i := 0; i < 1000; i++ {
-		check(roomA, allowedA, msgsB[i%len(msgsB)]) // prompt with the other room's text
-		check(roomA, allowedA, msgsA[i%len(msgsA)])
-		check(roomB, allowedB, msgsA[i%len(msgsA)])
-		check(roomB, allowedB, msgsB[i%len(msgsB)])
+		check(roomA, allowedA, sendersA[0], msgsB[i%len(msgsB)]) // prompt with the other room's text
+		check(roomA, allowedA, sendersA[1], msgsA[i%len(msgsA)])
+		check(roomB, allowedB, sendersB[0], msgsA[i%len(msgsA)])
+		check(roomB, allowedB, sendersB[1], msgsB[i%len(msgsB)])
+	}
+	if namesSeen == 0 {
+		t.Fatal("no mention placeholder was ever filled in; test isn't exercising names")
+	}
+	if rc, _, ok := brain.SuggestReaction(roomA, msgsA[1]); !ok || rc.Key != "🅰️" {
+		t.Fatalf("room A reaction not learned: %q %v", rc.Key, ok)
 	}
 }
 
-func mustLearn(t *testing.T, b *Brain, room id.RoomID, evt, body string) {
+func TestForgetRedactedMessage(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "markov.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	room := id.RoomID("!r:example.org")
+	brain, err := NewBrain(ctx, st, nil, map[id.RoomID]config.RoomSettings{
+		room: {Order: 1, MinWords: 1, MaxWords: 10, Learn: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustLearn(t, brain, room, "$secret", "@u:example.org", "topsecret topsecret topsecret")
+	mustReact(t, brain, room, "$r1", "$secret", "🤫")
+	mustReact(t, brain, room, "$r2", "$secret", "🤫")
+	if out := brain.Reply(ctx, room, "", ""); !strings.Contains(out, "topsecret") {
+		t.Fatalf("expected the message to be learned, got %q", out)
+	}
+	if forgot, err := brain.Forget(ctx, room, "$secret"); err != nil || !forgot {
+		t.Fatalf("Forget = %v, %v", forgot, err)
+	}
+	if out := brain.Reply(ctx, room, "", ""); out != "" {
+		t.Fatalf("redacted message still generated: %q", out)
+	}
+	if _, _, ok := brain.SuggestReaction(room, "topsecret"); ok {
+		t.Fatal("reactions on redacted message still suggested")
+	}
+}
+
+func mustLearn(t *testing.T, b *Brain, room id.RoomID, evt string, sender id.UserID, body string) {
 	t.Helper()
-	if err := b.Learn(context.Background(), room, id.EventID(evt), "@u:example.org", body, 1); err != nil {
+	if err := b.Learn(context.Background(), room, id.EventID(evt), sender, body, 1); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func set(lists ...[]string) map[string]bool {
-	m := map[string]bool{}
-	for _, l := range lists {
-		for _, w := range l {
-			m[w] = true
-			m[w+"."] = true // seed sentences end with a period
-		}
+func mustReact(t *testing.T, b *Brain, room id.RoomID, evt, target, key string) {
+	t.Helper()
+	if err := b.LearnReaction(context.Background(), room, id.EventID(evt), id.EventID(target), "@r:example.org", react.Reaction{Key: key}, 2); err != nil {
+		t.Fatal(err)
 	}
-	return m
 }

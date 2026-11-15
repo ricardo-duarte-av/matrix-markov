@@ -12,6 +12,9 @@ It's written in Go with [mautrix-go](https://github.com/mautrix/go) and supports
   - someone replies to one of its messages
   - a configured keyword appears
   - a random draw against `reply_chance` hits
+- **Mentions become placeholders.** When someone is mentioned (a pill in `formatted_body`, or a raw MXID), the mention is stored as a placeholder. When the bot speaks, each placeholder is filled with the display name of someone currently in the same room: a recent sender, or the person who triggered the reply. Names are plain text and never go into `m.mentions`, so nobody gets pinged. Mentions of the bot itself are removed.
+- **Reactions.** The bot learns which reactions people put on which words, per room, and reacts to new messages with the best match. See [Reactions](#reactions).
+- **Redactions are honoured.** When a learned message is redacted, it is deleted and the room's chain is rebuilt without it. When a reaction is redacted, it is unlearned.
 - **Configurable N-order.** Set it globally or per room. Changing it only needs a restart, because the chain is rebuilt from the stored raw messages.
 
 ## Build and run
@@ -30,7 +33,7 @@ Invite the bot to each configured room, or make the room public, and it joins.
 
 ### Docker
 
-CI builds and pushes `ghcr.io/ricardo-duarte-av/matrix-markov` on every push, for linux/amd64 and linux/arm64. The tags are:
+CI builds and pushes `ghcr.io/ricardo-duarte-av/matrix-markov` on every push, for linux/amd64 and linux/arm64. Each architecture builds on a native runner, so no emulation is involved. The tags are:
 
 - branch name
 - `sha-<commit>`
@@ -55,16 +58,29 @@ Seed file paths are relative to `/config`. To use seed files, uncomment the `./s
 
 - Each room learns from messages sent **after the bot joined**. It can't decrypt older history in encrypted rooms.
 - `seed_file` is plain text, for example a book from Project Gutenberg. It is split into sentences and loaded into the chain at startup, so the bot can talk from day one. Seed text is never written to the database. Pointing several rooms at the same seed file is fine, since it isn't room text.
-- Learned messages are stored in `data/markov.db`, table `messages(event_id, room_id, sender, body, ts)`. Before storing, the bot strips reply quotes, URLs and Matrix IDs, so it never pings anyone.
+- Learned messages are stored in `data/markov.db`, table `messages(event_id, room_id, sender, body, ts)`. Before storing, the bot strips reply quotes and URLs, and turns mentions into placeholders, so it never repeats an MXID or pings anyone.
 - To forget a room:
 
   ```sh
-  sqlite3 data/markov.db "DELETE FROM messages WHERE room_id='!id:server'"
+  sqlite3 data/markov.db "DELETE FROM messages WHERE room_id='!id:server'; DELETE FROM reactions WHERE room_id='!id:server'"
   ```
 
   Then restart the bot.
 
 **Privacy:** `markov.db` holds **plaintext** copies of messages from encrypted rooms. `crypto.db` holds the bot's private keys. Both files are created with mode `0600`. Protect `data/` accordingly.
+
+## Reactions
+
+- **Learning:** an `m.reaction` is learned only if it targets a message stored from the **same room**. It is saved in the `reactions` table.
+- **Keys:** reaction keys are arbitrary text, so a key is only accepted if:
+  - it is at most 32 characters and 256 bytes
+  - it is a single line with no control characters
+  - it contains no Matrix IDs, aliases or URLs
+
+  `mxc://` custom emoji are accepted, along with their `com.beeper.reaction.shortcode`.
+- **Scoring:** for a new message, each key the room has used at least twice gets a score. The score is how often that key followed each of the message's words, weighted so that distinctive words count more than common ones like "the".
+- **When it reacts:** the bot reacts when the best score is at least `react_threshold` and a random draw passes `react_chance`. If the bot was mentioned or replied to but has nothing to say yet, it reacts instead, if it has any suggestion at all. It reacts at most once per message.
+- **Encryption:** in encrypted rooms the bot encrypts its reactions itself (mautrix normally sends reactions unencrypted).
 
 ## Choosing the order
 

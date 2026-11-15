@@ -78,7 +78,7 @@ func (c *Chain) Add(text string) {
 		if !ok {
 			followers = make(map[string]int)
 			c.next[key] = followers
-			if w := normalize(prefix[len(prefix)-1]); len(w) >= minSeedLen {
+			if w := Normalize(prefix[len(prefix)-1]); len(w) >= minSeedLen {
 				c.byWord[w] = append(c.byWord[w], key)
 			}
 		}
@@ -99,7 +99,7 @@ func (c *Chain) Generate(r *rand.Rand, seedWords []string, minWords, maxWords in
 
 	var topics []string
 	for _, w := range seedWords {
-		if n := normalize(w); len(c.byWord[n]) > 0 {
+		if n := Normalize(w); len(c.byWord[n]) > 0 {
 			topics = append(topics, n)
 		}
 	}
