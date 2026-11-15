@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -36,6 +37,15 @@ type Bot struct {
 	brain  *Brain
 	me     identity
 	sent   *sentLog
+	// once holds keys of notices that are logged only once per run.
+	once sync.Map
+}
+
+// logOnce logs at info level the first time key is seen.
+func (b *Bot) logOnce(key string, fn func()) {
+	if _, seen := b.once.LoadOrStore(key, struct{}{}); !seen {
+		fn()
+	}
 }
 
 func New(cfg *config.Config, log zerolog.Logger) *Bot {
@@ -112,7 +122,8 @@ func (b *Bot) login(ctx context.Context) error {
 		InitialDeviceDisplayName: b.cfg.DeviceName,
 	}
 	helper.DecryptErrorCallback = func(evt *event.Event, err error) {
-		b.log.Warn().Err(err).Stringer("room_id", evt.RoomID).Stringer("event_id", evt.ID).Msg("Could not decrypt message")
+		b.log.Warn().Err(err).Stringer("room_id", evt.RoomID).Stringer("event_id", evt.ID).Stringer("sender", evt.Sender).
+			Msg("Could not decrypt message (the sender's client may not be sharing room keys with this device)")
 	}
 	if err = helper.Init(ctx); err != nil {
 		return fmt.Errorf("login / crypto init: %w", err)
@@ -163,10 +174,13 @@ func (b *Bot) joinRooms(ctx context.Context, rooms map[id.RoomID]config.RoomSett
 	}
 	for roomID := range rooms {
 		if joined[roomID] {
+			b.log.Info().Stringer("room_id", roomID).Msg("Watching configured room")
 			continue
 		}
 		if _, err := b.cli.JoinRoomByID(ctx, roomID); err != nil {
 			b.log.Warn().Err(err).Stringer("room_id", roomID).Msg("Could not join configured room yet (invite the bot)")
+		} else {
+			b.log.Info().Stringer("room_id", roomID).Msg("Joined configured room")
 		}
 	}
 }
@@ -189,20 +203,35 @@ func (b *Bot) handleMember(ctx context.Context, evt *event.Event) {
 }
 
 func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
+	log := b.log.With().Stringer("room_id", evt.RoomID).Stringer("event_id", evt.ID).Logger()
+	log.Debug().Stringer("sender", evt.Sender).Bool("decrypted", evt.Mautrix.EventSource&event.SourceDecrypted != 0).Msg("Received message event")
+
 	// Allowed-room check comes first: nothing from other rooms is learned or answered.
 	settings, ok := b.brain.Settings(evt.RoomID)
-	if !ok || evt.Sender == b.cli.UserID {
+	if !ok {
+		b.logOnce("room:"+evt.RoomID.String(), func() {
+			log.Info().Msg("Ignoring messages from a room that is not in config (logged once per room)")
+		})
+		return
+	}
+	if evt.Sender == b.cli.UserID {
+		if evt.Unsigned.TransactionID == "" { // not an echo of something this process sent
+			b.logOnce("self:"+evt.RoomID.String(), func() {
+				log.Info().Msg("Ignoring messages sent by the bot's own account from another client; use a separate account for the bot (logged once per room)")
+			})
+		}
 		return
 	}
 	msg := evt.Content.AsMessage()
 	if msg == nil || (msg.MsgType != event.MsgText && msg.MsgType != event.MsgEmote) {
+		log.Debug().Msg("Ignoring non-text message")
 		return
 	}
 	if msg.RelatesTo.GetReplaceID() != "" || msg.NewContent != nil {
-		return // edits
+		log.Debug().Msg("Ignoring edit")
+		return
 	}
 	msg.RemoveReplyFallback()
-	log := b.log.With().Stringer("room_id", evt.RoomID).Stringer("event_id", evt.ID).Logger()
 
 	reason := decideTrigger(b.me, msg, b.sent, settings.Keywords, settings.ReplyChance, rand.Float64())
 	body := b.me.learnableBody(msg)
@@ -235,7 +264,7 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 	// If the bot was addressed but had nothing to say, react instead
 	// whenever it has any suggestion at all.
 	rc, score, ok := b.brain.SuggestReaction(evt.RoomID, body)
-	forced := reason != reasonNone && reason != reasonRandom && !replied
+	forced := reason.addressed() && !replied
 	if ok && (forced || (score >= settings.ReactThreshold && rand.Float64() < settings.ReactChance)) {
 		if err := b.sendReaction(ctx, evt.RoomID, evt.ID, rc); err != nil {
 			log.Error().Err(err).Msg("Failed to send reaction")
@@ -253,10 +282,10 @@ func (b *Bot) reply(ctx context.Context, evt *event.Event, body string, reason t
 		return false
 	}
 	content := &event.MessageEventContent{MsgType: event.MsgText, Body: text}
-	if reason != reasonRandom {
+	if reason.addressed() {
 		content.SetReply(evt) // mentions only the person replied to
 	} else {
-		content.Mentions = &event.Mentions{} // explicitly mention nobody
+		content.Mentions = &event.Mentions{} // keyword/random: just talk, mention nobody
 	}
 	resp, err := b.cli.SendMessageEvent(ctx, evt.RoomID, event.EventMessage, content)
 	if err != nil {

@@ -7,9 +7,11 @@ It's written in Go with [mautrix-go](https://github.com/mautrix/go) and supports
 
 - **Rooms are kept apart.** Each allowed room has its own chain, built only from that room's messages and its own optional seed file. No chain is shared. Messages from rooms that aren't configured are ignored, and invites to them are rejected.
 - **E2EE.** Uses mautrix's crypto helper. The device and its keys are kept in `data/crypto.db`, so restarts reuse the same device.
-- **Triggers.** The bot replies when:
+- **Triggers.** The bot answers **as a reply** when it is addressed:
   - it is mentioned (via `m.mentions`, its MXID, display name or localpart)
   - someone replies to one of its messages
+
+  It **just talks** in the room (a plain message that mentions nobody) when:
   - a configured keyword appears
   - a random draw against `reply_chance` hits
 - **Mentions become placeholders.** When someone is mentioned (a pill in `formatted_body`, or a raw MXID), the mention is stored as a placeholder. When the bot speaks, each placeholder is filled with the display name of someone currently in the same room: a recent sender, or the person who triggered the reply. Names are plain text and never go into `m.mentions`, so nobody gets pinged. Mentions of the bot itself are removed.
@@ -80,7 +82,7 @@ Seed file paths are relative to `/config`. To use seed files, uncomment the `./s
 
   `mxc://` custom emoji are accepted, along with their `com.beeper.reaction.shortcode`.
 - **Scoring:** for a new message, each key the room has used at least twice gets a score. The score is how often that key followed each of the message's words, weighted so that distinctive words count more than common ones like "the".
-- **When it reacts:** the bot reacts when the best score is at least `react_threshold` and a random draw passes `react_chance`. If the bot was mentioned or replied to but has nothing to say yet, it reacts instead, if it has any suggestion at all. It reacts at most once per message.
+- **When it reacts:** the bot reacts when the best score is at least `react_threshold` and a random draw passes `react_chance`. If the bot was addressed (mentioned or replied to) but has nothing to say yet, it reacts instead, if it has any suggestion at all. It reacts at most once per message.
 - **Encryption:** in encrypted rooms the bot encrypts its reactions itself (mautrix normally sends reactions unencrypted).
 
 ## Logging

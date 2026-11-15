@@ -40,6 +40,16 @@ func TestDecideTrigger(t *testing.T) {
 	}
 }
 
+func TestAddressed(t *testing.T) {
+	for r, want := range map[triggerReason]bool{
+		reasonMention: true, reasonReply: true, reasonKeyword: false, reasonRandom: false, reasonNone: false,
+	} {
+		if got := r.addressed(); got != want {
+			t.Errorf("%q.addressed() = %v, want %v", r, got, want)
+		}
+	}
+}
+
 func TestStripMention(t *testing.T) {
 	me := identity{userID: "@markov:example.org", displayName: "Markov Bot"}
 	for in, want := range map[string]string{

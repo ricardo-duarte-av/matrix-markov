@@ -114,6 +114,13 @@ func (s *sentLog) has(evtID id.EventID) bool {
 	return ok
 }
 
+// addressed reports whether the message was directed at the bot (a mention
+// or a reply to it). Only then does the bot answer as a reply; keywords and
+// random chance make it just talk in the room.
+func (r triggerReason) addressed() bool {
+	return r == reasonMention || r == reasonReply
+}
+
 // decideTrigger picks why (if at all) the bot should answer a message.
 // roll is a uniform random number in [0,1).
 func decideTrigger(me identity, msg *event.MessageEventContent, sent *sentLog, keywords []string, chance, roll float64) triggerReason {
