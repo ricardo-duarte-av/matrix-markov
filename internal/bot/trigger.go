@@ -114,6 +114,21 @@ func (s *sentLog) has(evtID id.EventID) bool {
 	return ok
 }
 
+// hasText reports whether a message carries text to learn and respond to:
+// text and emotes, or images/videos/audio/files with a caption. Per the spec,
+// media has a caption when filename is set and body differs from it; body
+// (and formatted_body) then hold the caption. Without a caption, body is
+// just the file name and is ignored.
+func hasText(msg *event.MessageEventContent) bool {
+	switch msg.MsgType {
+	case event.MsgText, event.MsgEmote:
+		return true
+	case event.MsgImage, event.MsgVideo, event.MsgAudio, event.MsgFile:
+		return msg.GetCaption() != ""
+	}
+	return false
+}
+
 // addressed reports whether the message was directed at the bot (a mention
 // or a reply to it). Only then does the bot answer as a reply; keywords and
 // random chance make it just talk in the room.

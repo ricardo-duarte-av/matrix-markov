@@ -223,8 +223,8 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 		return
 	}
 	msg := evt.Content.AsMessage()
-	if msg == nil || (msg.MsgType != event.MsgText && msg.MsgType != event.MsgEmote) {
-		log.Debug().Msg("Ignoring non-text message")
+	if msg == nil || !hasText(msg) {
+		log.Debug().Msg("Ignoring message without text (non-text type, or media without caption)")
 		return
 	}
 	if msg.RelatesTo.GetReplaceID() != "" || msg.NewContent != nil {

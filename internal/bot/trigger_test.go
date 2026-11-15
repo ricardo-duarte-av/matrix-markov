@@ -40,6 +40,30 @@ func TestDecideTrigger(t *testing.T) {
 	}
 }
 
+func TestHasText(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  event.MessageEventContent
+		want bool
+	}{
+		{"text", event.MessageEventContent{MsgType: event.MsgText, Body: "hi"}, true},
+		{"emote", event.MessageEventContent{MsgType: event.MsgEmote, Body: "waves"}, true},
+		{"notice", event.MessageEventContent{MsgType: event.MsgNotice, Body: "bot output"}, false},
+		// The gomuks example: an image with the caption "squeaky bum".
+		{"image with caption", event.MessageEventContent{MsgType: event.MsgImage, Body: "squeaky bum", FileName: "image.png"}, true},
+		{"image without caption", event.MessageEventContent{MsgType: event.MsgImage, Body: "image.png", FileName: "image.png"}, false},
+		{"legacy image (body is the file name)", event.MessageEventContent{MsgType: event.MsgImage, Body: "cat.jpg"}, false},
+		{"video with caption", event.MessageEventContent{MsgType: event.MsgVideo, Body: "look at this", FileName: "clip.mp4"}, true},
+		{"file with caption", event.MessageEventContent{MsgType: event.MsgFile, Body: "the report", FileName: "report.pdf"}, true},
+		{"location", event.MessageEventContent{MsgType: event.MsgLocation, Body: "somewhere"}, false},
+	}
+	for _, c := range cases {
+		if got := hasText(&c.msg); got != c.want {
+			t.Errorf("%s: hasText = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestAddressed(t *testing.T) {
 	for r, want := range map[triggerReason]bool{
 		reasonMention: true, reasonReply: true, reasonKeyword: false, reasonRandom: false, reasonNone: false,

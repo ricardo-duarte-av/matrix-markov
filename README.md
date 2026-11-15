@@ -62,6 +62,7 @@ Seed file paths are relative to `/config`. To use seed files, uncomment the `./s
 - Each room learns from messages sent **after the bot joined**. It can't decrypt older history in encrypted rooms.
 - `seed_file` is plain text, for example a book from Project Gutenberg. It is split into sentences and loaded into the chain at startup, so the bot can talk from day one. Seed text is never written to the database. Pointing several rooms at the same seed file is fine, since it isn't room text.
 - Learned messages are stored in `data/markov.db`, table `messages(event_id, room_id, sender, body, ts)`. Before storing, the bot strips reply quotes and URLs, and turns mentions into placeholders, so it never repeats an MXID or pings anyone.
+- **Media captions:** images, videos, audio and files are learned (and can trigger the bot) through their caption. A caption is present when `filename` is set and `body` differs from it. Media without a caption is ignored, because its `body` is just the file name.
 - **Short messages:** a message is added to the chain only if it has at least `min_learn_words` words (default 2) left after cleaning. For example, `https://bsky.app/… lmao?` becomes just `lmao?` and stays out of the chain. It is still stored, though, so reactions on it are learned, and changing the threshold only needs a restart. Link-preview metadata (`com.beeper.linkpreviews`) is never learned. A message that is only a URL is not stored at all.
 - To forget a room:
 
