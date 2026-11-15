@@ -50,6 +50,9 @@ type Room struct {
 	ReplyChance *float64  `yaml:"reply_chance"`
 	Keywords    *[]string `yaml:"keywords"`
 	Learn       *bool     `yaml:"learn"`
+	// Respond false makes the room learn-only: the bot never sends messages
+	// or reactions there, whatever triggered it.
+	Respond *bool `yaml:"respond"`
 
 	MinLearnWords *int `yaml:"min_learn_words"`
 
@@ -67,6 +70,7 @@ type RoomSettings struct {
 	ReplyChance float64
 	Keywords    []string
 	Learn       bool
+	Respond     bool
 	MaxMessages int
 
 	MinLearnWords int
@@ -193,6 +197,7 @@ func (c *Config) RoomSettings(r Room) RoomSettings {
 		ReplyChance: c.Markov.ReplyChance,
 		Keywords:    c.Markov.Keywords,
 		Learn:       true,
+		Respond:     true,
 		MaxMessages: c.Markov.MaxMessages,
 
 		MinLearnWords: c.Markov.MinLearnWords,
@@ -214,6 +219,9 @@ func (c *Config) RoomSettings(r Room) RoomSettings {
 	}
 	if r.Learn != nil {
 		s.Learn = *r.Learn
+	}
+	if r.Respond != nil {
+		s.Respond = *r.Respond
 	}
 	if r.MinLearnWords != nil {
 		s.MinLearnWords = *r.MinLearnWords

@@ -36,6 +36,7 @@ rooms:
     learn: false
     react_chance: 1
     min_learn_words: 4
+    respond: false
 `)
 	cfg, err := Load(p)
 	if err != nil {
@@ -46,6 +47,9 @@ rooms:
 		t.Fatalf("room a defaults wrong: %+v", a)
 	}
 	b := cfg.RoomSettings(cfg.Rooms[1])
+	if !a.Respond || b.Respond {
+		t.Fatalf("respond wrong: a=%v b=%v", a.Respond, b.Respond)
+	}
 	if a.MinLearnWords != 2 || b.MinLearnWords != 4 {
 		t.Fatalf("min_learn_words wrong: a=%d b=%d", a.MinLearnWords, b.MinLearnWords)
 	}

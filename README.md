@@ -17,6 +17,7 @@ It's written in Go with [mautrix-go](https://github.com/mautrix/go) and supports
 - **Mentions become placeholders.** When someone is mentioned (a pill in `formatted_body`, or a raw MXID), the mention is stored as a placeholder. When the bot speaks, each placeholder is filled with the display name of someone currently in the same room: a recent sender, or the person who triggered the reply. Names are plain text and never go into `m.mentions`, so nobody gets pinged. Mentions of the bot itself are removed.
 - **Reactions.** The bot learns which reactions people put on which words, per room, and reacts to new messages with the best match. See [Reactions](#reactions).
 - **Redactions are honoured.** When a learned message is redacted, it is deleted and the room's chain is rebuilt without it. When a reaction is redacted, it is unlearned.
+- **Learn-only rooms.** With `respond: false` on a room, the bot keeps learning there but never sends messages or reactions, whatever triggered it. With `learn: false`, it talks from its seed file but learns nothing. The two settings are independent.
 - **Configurable N-order.** Set it globally or per room. Changing it only needs a restart, because the chain is rebuilt from the stored raw messages.
 
 ## Build and run

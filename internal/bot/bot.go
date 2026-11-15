@@ -174,13 +174,13 @@ func (b *Bot) joinRooms(ctx context.Context, rooms map[id.RoomID]config.RoomSett
 	}
 	for roomID := range rooms {
 		if joined[roomID] {
-			b.log.Info().Stringer("room_id", roomID).Msg("Watching configured room")
+			b.log.Info().Stringer("room_id", roomID).Bool("learn", rooms[roomID].Learn).Bool("respond", rooms[roomID].Respond).Msg("Watching configured room")
 			continue
 		}
 		if _, err := b.cli.JoinRoomByID(ctx, roomID); err != nil {
 			b.log.Warn().Err(err).Stringer("room_id", roomID).Msg("Could not join configured room yet (invite the bot)")
 		} else {
-			b.log.Info().Stringer("room_id", roomID).Msg("Joined configured room")
+			b.log.Info().Stringer("room_id", roomID).Bool("learn", rooms[roomID].Learn).Bool("respond", rooms[roomID].Respond).Msg("Joined configured room")
 		}
 	}
 }
@@ -250,6 +250,9 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 		log.Debug().Str("outcome", string(outcome)).Msg("Message not learned")
 	}
 
+	if !settings.Respond {
+		return // learn-only room
+	}
 	if age := time.Since(time.UnixMilli(evt.Timestamp)); age > replyMaxAge {
 		log.Debug().Dur("age", age).Msg("Not responding to old message")
 		return

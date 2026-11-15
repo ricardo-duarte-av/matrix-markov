@@ -39,3 +39,5 @@ rooms:
     keywords: ["markov", "bot"]
     react_chance: 0.2
     learn: true                  # false = only talk from the seed file, learn neither messages nor reactions
+  - id: "!lurk:example.org"
+    respond: false               # learn-only: never send messages or reactions here
