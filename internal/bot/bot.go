@@ -207,12 +207,22 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 	reason := decideTrigger(b.me, msg, b.sent, settings.Keywords, settings.ReplyChance, rand.Float64())
 	body := b.me.learnableBody(msg)
 
-	if err := b.brain.Learn(ctx, evt.RoomID, evt.ID, evt.Sender, body, evt.Timestamp); err != nil {
+	// Message text is never logged above debug level: it may come from an
+	// encrypted room.
+	switch outcome, words, err := b.brain.Learn(ctx, evt.RoomID, evt.ID, evt.Sender, body, evt.Timestamp); {
+	case err != nil:
 		log.Error().Err(err).Msg("Failed to learn message")
+	case outcome == LearnChained:
+		log.Info().Stringer("sender", evt.Sender).Int("words", words).Msg("Added message to room corpus")
+	case outcome == LearnStored:
+		log.Info().Stringer("sender", evt.Sender).Int("words", words).Int("min_learn_words", settings.MinLearnWords).
+			Msg("Stored short message for reactions (not added to chain)")
+	default:
+		log.Debug().Str("outcome", string(outcome)).Msg("Message not learned")
 	}
 
 	if age := time.Since(time.UnixMilli(evt.Timestamp)); age > replyMaxAge {
-		log.Debug().Dur("age", age).Msg("Not reacting to old message")
+		log.Debug().Dur("age", age).Msg("Not responding to old message")
 		return
 	}
 
@@ -230,7 +240,7 @@ func (b *Bot) handleMessage(ctx context.Context, evt *event.Event) {
 		if err := b.sendReaction(ctx, evt.RoomID, evt.ID, rc); err != nil {
 			log.Error().Err(err).Msg("Failed to send reaction")
 		} else {
-			log.Debug().Str("key", rc.Key).Float64("score", score).Msg("Reacted")
+			log.Info().Str("key", rc.Key).Float64("score", score).Bool("forced", forced).Msg("Sent reaction")
 		}
 	}
 }
@@ -239,7 +249,7 @@ func (b *Bot) reply(ctx context.Context, evt *event.Event, body string, reason t
 	log := b.log.With().Stringer("room_id", evt.RoomID).Stringer("event_id", evt.ID).Logger()
 	text := b.brain.Reply(ctx, evt.RoomID, body, evt.Sender)
 	if text == "" {
-		log.Debug().Str("reason", string(reason)).Msg("Nothing to say yet")
+		log.Info().Str("reason", string(reason)).Msg("Triggered, but the room corpus has nothing to say yet")
 		return false
 	}
 	content := &event.MessageEventContent{MsgType: event.MsgText, Body: text}
@@ -254,7 +264,8 @@ func (b *Bot) reply(ctx context.Context, evt *event.Event, body string, reason t
 		return false
 	}
 	b.sent.add(resp.EventID)
-	log.Debug().Str("reason", string(reason)).Msg("Replied")
+	log.Info().Str("reason", string(reason)).Int("words", len(strings.Fields(text))).Stringer("reply_id", resp.EventID).Msg("Sent reply")
+	log.Debug().Str("text", text).Msg("Reply text")
 	return true
 }
 
@@ -270,8 +281,15 @@ func (b *Bot) handleReaction(ctx context.Context, evt *event.Event) {
 	if sc, ok := evt.Content.Raw["com.beeper.reaction.shortcode"].(string); ok {
 		rc.Shortcode = sc
 	}
-	if err := b.brain.LearnReaction(ctx, evt.RoomID, evt.ID, content.RelatesTo.EventID, evt.Sender, rc, evt.Timestamp); err != nil {
-		b.log.Error().Err(err).Stringer("room_id", evt.RoomID).Stringer("event_id", evt.ID).Msg("Failed to learn reaction")
+	log := b.log.With().Stringer("room_id", evt.RoomID).Stringer("event_id", evt.ID).Stringer("target", content.RelatesTo.EventID).Logger()
+	learned, err := b.brain.LearnReaction(ctx, evt.RoomID, evt.ID, content.RelatesTo.EventID, evt.Sender, rc, evt.Timestamp)
+	switch {
+	case err != nil:
+		log.Error().Err(err).Msg("Failed to learn reaction")
+	case learned:
+		log.Info().Stringer("sender", evt.Sender).Str("key", rc.Key).Msg("Learned reaction")
+	default:
+		log.Debug().Msg("Reaction not learned (unknown target, duplicate or invalid key)")
 	}
 }
 
@@ -286,11 +304,11 @@ func (b *Bot) handleRedaction(ctx context.Context, evt *event.Event) {
 	if target == "" {
 		return
 	}
-	forgot, err := b.brain.Forget(ctx, evt.RoomID, target)
+	kind, err := b.brain.Forget(ctx, evt.RoomID, target)
 	if err != nil {
 		b.log.Error().Err(err).Stringer("room_id", evt.RoomID).Stringer("redacts", target).Msg("Failed to forget redacted event")
-	} else if forgot {
-		b.log.Debug().Stringer("room_id", evt.RoomID).Stringer("redacts", target).Msg("Forgot redacted event")
+	} else if kind != "" {
+		b.log.Info().Stringer("room_id", evt.RoomID).Stringer("redacts", target).Str("kind", kind).Msg("Forgot redacted " + kind)
 	}
 }
 

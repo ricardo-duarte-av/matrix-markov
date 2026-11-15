@@ -66,7 +66,7 @@ func TestRoomsDoNotLeak(t *testing.T) {
 		return p
 	}
 	settings := func(rid id.RoomID, seed string, order int) config.RoomSettings {
-		return config.RoomSettings{ID: rid.String(), SeedFile: seed, Order: order, MinWords: 3, MaxWords: 25, Learn: true}
+		return config.RoomSettings{ID: rid.String(), SeedFile: seed, Order: order, MinWords: 3, MaxWords: 25, Learn: true, MinLearnWords: 2}
 	}
 	rooms := map[id.RoomID]config.RoomSettings{
 		roomA: settings(roomA, writeSeed("a.txt", seedA), 2),
@@ -170,7 +170,7 @@ func TestForgetRedactedMessage(t *testing.T) {
 	defer st.Close()
 	room := id.RoomID("!r:example.org")
 	brain, err := NewBrain(ctx, st, nil, map[id.RoomID]config.RoomSettings{
-		room: {Order: 1, MinWords: 1, MaxWords: 10, Learn: true},
+		room: {Order: 1, MinWords: 1, MaxWords: 10, Learn: true, MinLearnWords: 1},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -181,8 +181,8 @@ func TestForgetRedactedMessage(t *testing.T) {
 	if out := brain.Reply(ctx, room, "", ""); !strings.Contains(out, "topsecret") {
 		t.Fatalf("expected the message to be learned, got %q", out)
 	}
-	if forgot, err := brain.Forget(ctx, room, "$secret"); err != nil || !forgot {
-		t.Fatalf("Forget = %v, %v", forgot, err)
+	if kind, err := brain.Forget(ctx, room, "$secret"); err != nil || kind != "message" {
+		t.Fatalf("Forget = %q, %v", kind, err)
 	}
 	if out := brain.Reply(ctx, room, "", ""); out != "" {
 		t.Fatalf("redacted message still generated: %q", out)
@@ -194,14 +194,71 @@ func TestForgetRedactedMessage(t *testing.T) {
 
 func mustLearn(t *testing.T, b *Brain, room id.RoomID, evt string, sender id.UserID, body string) {
 	t.Helper()
-	if err := b.Learn(context.Background(), room, id.EventID(evt), sender, body, 1); err != nil {
+	if _, _, err := b.Learn(context.Background(), room, id.EventID(evt), sender, body, 1); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func mustReact(t *testing.T, b *Brain, room id.RoomID, evt, target, key string) {
 	t.Helper()
-	if err := b.LearnReaction(context.Background(), room, id.EventID(evt), id.EventID(target), "@r:example.org", react.Reaction{Key: key}, 2); err != nil {
+	if _, err := b.LearnReaction(context.Background(), room, id.EventID(evt), id.EventID(target), "@r:example.org", react.Reaction{Key: key}, 2); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// TestShortMessages: the gomuks example "<url> lmao?" cleans to one word. It
+// must be stored (so reactions on it are learned) but not added to the
+// chain, both live and after a rebuild from the database.
+func TestShortMessages(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "markov.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	room := id.RoomID("!r:example.org")
+	rooms := map[id.RoomID]config.RoomSettings{room: {Order: 1, MinWords: 1, MaxWords: 10, Learn: true, MinLearnWords: 2}}
+	brain, err := NewBrain(ctx, st, nil, rooms)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		evt, body string
+		want      LearnOutcome
+	}{
+		{"$1", "https://bsky.app/profile/mlyp.bsky.social/post/3n22sr3zsw22k lmao?", LearnStored},
+		{"$2", "https://example.com/only-a-link", LearnIgnored},
+		{"$3", "two words", LearnChained},
+		{"$3", "two words", LearnDuplicate},
+	}
+	for _, c := range cases {
+		got, _, err := brain.Learn(ctx, room, id.EventID(c.evt), "@u:example.org", c.body, 1)
+		if err != nil || got != c.want {
+			t.Fatalf("Learn(%q) = %q, %v; want %q", c.body, got, err, c.want)
+		}
+	}
+	for _, br := range []*Brain{brain, must(NewBrain(ctx, st, nil, rooms))} { // live, then rebuilt
+		for i := 0; i < 200; i++ {
+			if out := br.Reply(ctx, room, "", ""); strings.Contains(out, "lmao") {
+				t.Fatalf("short message reached the chain: %q", out)
+			}
+		}
+	}
+	// Reactions on the short message are still learned.
+	for i, k := range []string{"$r1", "$r2"} {
+		if ok, err := brain.LearnReaction(ctx, room, id.EventID(k), "$1", id.UserID(fmt.Sprintf("@r%d:x", i)), react.Reaction{Key: "😂"}, 2); err != nil || !ok {
+			t.Fatalf("reaction on short message not learned: %v %v", ok, err)
+		}
+	}
+	if rc, _, ok := brain.SuggestReaction(room, "lmao"); !ok || rc.Key != "😂" {
+		t.Fatalf("SuggestReaction = %q %v", rc.Key, ok)
+	}
+}
+
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
 }

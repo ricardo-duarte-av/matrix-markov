@@ -32,6 +32,10 @@ type Markov struct {
 	Keywords    []string `yaml:"keywords"`
 	SeedFile    string   `yaml:"seed_file"`
 	MaxMessages int      `yaml:"max_messages"`
+	// MinLearnWords is the minimum number of words (after removing URLs and
+	// IDs) a message needs to be added to the chain. Shorter messages are
+	// still stored, so reactions on them are learned.
+	MinLearnWords int `yaml:"min_learn_words"`
 	// ReactChance is the probability of reacting when a reaction scores at
 	// least ReactThreshold (0..1).
 	ReactChance    float64 `yaml:"react_chance"`
@@ -46,6 +50,8 @@ type Room struct {
 	ReplyChance *float64  `yaml:"reply_chance"`
 	Keywords    *[]string `yaml:"keywords"`
 	Learn       *bool     `yaml:"learn"`
+
+	MinLearnWords *int `yaml:"min_learn_words"`
 
 	ReactChance    *float64 `yaml:"react_chance"`
 	ReactThreshold *float64 `yaml:"react_threshold"`
@@ -62,6 +68,8 @@ type RoomSettings struct {
 	Keywords    []string
 	Learn       bool
 	MaxMessages int
+
+	MinLearnWords int
 
 	ReactChance    float64
 	ReactThreshold float64
@@ -82,6 +90,8 @@ func Load(path string) (*Config, error) {
 			MaxWords:    30,
 			ReplyChance: 0.02,
 			MaxMessages: 50000,
+
+			MinLearnWords: 2,
 
 			ReactChance:    0.1,
 			ReactThreshold: 0.35,
@@ -154,6 +164,9 @@ func (c *Config) Validate() error {
 		if s.ReplyChance < 0 || s.ReplyChance > 1 {
 			errs = append(errs, fmt.Errorf("room %s: reply_chance must be between 0 and 1", r.ID))
 		}
+		if s.MinLearnWords < 1 {
+			errs = append(errs, fmt.Errorf("room %s: min_learn_words must be >= 1", r.ID))
+		}
 		if s.ReactChance < 0 || s.ReactChance > 1 {
 			errs = append(errs, fmt.Errorf("room %s: react_chance must be between 0 and 1", r.ID))
 		}
@@ -182,6 +195,8 @@ func (c *Config) RoomSettings(r Room) RoomSettings {
 		Learn:       true,
 		MaxMessages: c.Markov.MaxMessages,
 
+		MinLearnWords: c.Markov.MinLearnWords,
+
 		ReactChance:    c.Markov.ReactChance,
 		ReactThreshold: c.Markov.ReactThreshold,
 	}
@@ -199,6 +214,9 @@ func (c *Config) RoomSettings(r Room) RoomSettings {
 	}
 	if r.Learn != nil {
 		s.Learn = *r.Learn
+	}
+	if r.MinLearnWords != nil {
+		s.MinLearnWords = *r.MinLearnWords
 	}
 	if r.ReactChance != nil {
 		s.ReactChance = *r.ReactChance

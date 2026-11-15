@@ -59,6 +59,7 @@ Seed file paths are relative to `/config`. To use seed files, uncomment the `./s
 - Each room learns from messages sent **after the bot joined**. It can't decrypt older history in encrypted rooms.
 - `seed_file` is plain text, for example a book from Project Gutenberg. It is split into sentences and loaded into the chain at startup, so the bot can talk from day one. Seed text is never written to the database. Pointing several rooms at the same seed file is fine, since it isn't room text.
 - Learned messages are stored in `data/markov.db`, table `messages(event_id, room_id, sender, body, ts)`. Before storing, the bot strips reply quotes and URLs, and turns mentions into placeholders, so it never repeats an MXID or pings anyone.
+- **Short messages:** a message is added to the chain only if it has at least `min_learn_words` words (default 2) left after cleaning. For example, `https://bsky.app/… lmao?` becomes just `lmao?` and stays out of the chain. It is still stored, though, so reactions on it are learned, and changing the threshold only needs a restart. Link-preview metadata (`com.beeper.linkpreviews`) is never learned. A message that is only a URL is not stored at all.
 - To forget a room:
 
   ```sh
@@ -81,6 +82,17 @@ Seed file paths are relative to `/config`. To use seed files, uncomment the `./s
 - **Scoring:** for a new message, each key the room has used at least twice gets a score. The score is how often that key followed each of the message's words, weighted so that distinctive words count more than common ones like "the".
 - **When it reacts:** the bot reacts when the best score is at least `react_threshold` and a random draw passes `react_chance`. If the bot was mentioned or replied to but has nothing to say yet, it reacts instead, if it has any suggestion at all. It reacts at most once per message.
 - **Encryption:** in encrypted rooms the bot encrypts its reactions itself (mautrix normally sends reactions unencrypted).
+
+## Logging
+
+At `log_level: info`, the bot logs one line per action, with the room and event IDs:
+
+- `Added message to room corpus` / `Stored short message for reactions (not added to chain)`
+- `Learned reaction`, `Forgot redacted message|reaction`
+- `Sent reply` (with the trigger reason and word count), `Sent reaction` (with key and score)
+- `Triggered, but the room corpus has nothing to say yet`
+
+Message text is never logged above `debug`, because it may come from an encrypted room. At `debug`, the text of the bot's own replies is logged too.
 
 ## Choosing the order
 

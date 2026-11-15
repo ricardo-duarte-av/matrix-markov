@@ -69,11 +69,16 @@ func (b *Brain) rebuild(ctx context.Context, roomID id.RoomID, rb *roomBrain) er
 			return fmt.Errorf("room %s: %w", roomID, err)
 		}
 	}
-	if _, err := b.store.ForEach(ctx, roomID.String(), chain.Add); err != nil {
+	_, err := b.store.ForEach(ctx, roomID.String(), func(body string) {
+		if len(markov.Tokenize(body)) >= s.MinLearnWords {
+			chain.Add(body)
+		}
+	})
+	if err != nil {
 		return fmt.Errorf("room %s: load messages: %w", roomID, err)
 	}
 	reactor := react.New()
-	err := b.store.ForEachReaction(ctx, roomID.String(), func(r store.Reaction) {
+	err = b.store.ForEachReaction(ctx, roomID.String(), func(r store.Reaction) {
 		reactor.Add(r.Target, r.TargetBody, react.Reaction{Key: r.Key, Shortcode: r.Shortcode})
 	})
 	if err != nil {
@@ -136,76 +141,95 @@ func (b *Brain) Stats(ctx context.Context, roomID id.RoomID) (int, int, error) {
 	return n, chain.Size(), err
 }
 
-// Learn stores and learns one message in one room. Rooms that aren't allowed
-// or have learning off are ignored. body should already have mentions
-// replaced by markov.UserPlaceholder.
-func (b *Brain) Learn(ctx context.Context, roomID id.RoomID, eventID id.EventID, sender id.UserID, body string, ts int64) error {
+// LearnOutcome says what Learn did with a message.
+type LearnOutcome string
+
+const (
+	LearnIgnored   LearnOutcome = "ignored"   // room not allowed, learning off, or nothing left after cleaning
+	LearnDuplicate LearnOutcome = "duplicate" // already stored (e.g. redelivered after restart)
+	LearnStored    LearnOutcome = "stored"    // stored (for reactions) but too short for the chain
+	LearnChained   LearnOutcome = "chained"   // stored and added to the chain
+)
+
+// Learn stores and learns one message in one room. body should already have
+// mentions replaced by markov.UserPlaceholder. Every message with some text
+// left after cleaning is stored, so reactions on it can be learned; only
+// those with at least min_learn_words words are added to the chain.
+func (b *Brain) Learn(ctx context.Context, roomID id.RoomID, eventID id.EventID, sender id.UserID, body string, ts int64) (LearnOutcome, int, error) {
 	rb, ok := b.rooms[roomID]
 	if !ok || !rb.settings.Learn {
-		return nil
+		return LearnIgnored, 0, nil
 	}
 	clean := markov.Clean(body)
-	if clean == "" {
-		return nil
+	words := len(markov.Tokenize(clean))
+	if words == 0 {
+		return LearnIgnored, 0, nil
 	}
 	inserted, err := b.store.Add(ctx, roomID.String(), eventID.String(), sender.String(), clean, ts)
-	if err != nil || !inserted {
-		return err // !inserted: already learned (e.g. redelivered after restart)
+	if err != nil {
+		return LearnIgnored, words, err
+	} else if !inserted {
+		return LearnDuplicate, words, nil
 	}
-	chain, _ := rb.models()
-	chain.Add(clean)
 	rb.noteSender(sender)
+	outcome := LearnStored
+	if words >= rb.settings.MinLearnWords {
+		chain, _ := rb.models()
+		chain.Add(clean)
+		outcome = LearnChained
+	}
 	// Pruning only bounds the database; the in-memory chain shrinks on restart.
-	return b.store.Prune(ctx, roomID.String(), rb.settings.MaxMessages)
+	return outcome, words, b.store.Prune(ctx, roomID.String(), rb.settings.MaxMessages)
 }
 
-// LearnReaction records a reaction on a message. Only reactions on messages
-// stored in the same room are learned, and keys must pass react.ValidKey.
-func (b *Brain) LearnReaction(ctx context.Context, roomID id.RoomID, eventID, target id.EventID, sender id.UserID, rc react.Reaction, ts int64) error {
+// LearnReaction records a reaction on a message and reports whether it was
+// learned. Only reactions on messages stored in the same room are learned,
+// and keys must pass react.ValidKey.
+func (b *Brain) LearnReaction(ctx context.Context, roomID id.RoomID, eventID, target id.EventID, sender id.UserID, rc react.Reaction, ts int64) (bool, error) {
 	rb, ok := b.rooms[roomID]
 	if !ok || !rb.settings.Learn || !react.ValidKey(rc.Key) {
-		return nil
+		return false, nil
 	}
 	if !react.ValidShortcode(rc.Shortcode) || !strings.HasPrefix(rc.Key, "mxc://") {
 		rc.Shortcode = ""
 	}
 	body, found, err := b.store.Message(ctx, roomID.String(), target.String())
 	if err != nil || !found {
-		return err
+		return false, err
 	}
 	inserted, err := b.store.AddReaction(ctx, roomID.String(), store.Reaction{
 		EventID: eventID.String(), Target: target.String(), Sender: sender.String(), Key: rc.Key, Shortcode: rc.Shortcode,
 	}, ts)
 	if err != nil || !inserted {
-		return err
+		return false, err
 	}
 	_, reactor := rb.models()
 	reactor.Add(target.String(), body, rc)
-	return nil
+	return true, nil
 }
 
 // Forget handles a redaction in one room: a redacted reaction is unlearned,
 // and a redacted message is deleted and the room's models are rebuilt
-// without it.
-func (b *Brain) Forget(ctx context.Context, roomID id.RoomID, eventID id.EventID) (bool, error) {
+// without it. It returns what was forgotten: "reaction", "message" or "".
+func (b *Brain) Forget(ctx context.Context, roomID id.RoomID, eventID id.EventID) (string, error) {
 	rb, ok := b.rooms[roomID]
 	if !ok {
-		return false, nil
+		return "", nil
 	}
 	r, err := b.store.DeleteReaction(ctx, roomID.String(), eventID.String())
 	if err != nil {
-		return false, err
+		return "", err
 	}
 	if r != nil {
 		_, reactor := rb.models()
 		reactor.Remove(r.Target, r.Key)
-		return true, nil
+		return "reaction", nil
 	}
 	deleted, err := b.store.DeleteMessage(ctx, roomID.String(), eventID.String())
 	if err != nil || !deleted {
-		return false, err
+		return "", err
 	}
-	return true, b.rebuild(ctx, roomID, rb)
+	return "message", b.rebuild(ctx, roomID, rb)
 }
 
 // Reply generates a message for one room, using prompt (the triggering
