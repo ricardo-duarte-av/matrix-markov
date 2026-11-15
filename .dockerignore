@@ -1,0 +1,8 @@
+.git
+.github
+.claude
+data
+config.yaml
+markov-bot
+docker-compose.yaml
+*.md

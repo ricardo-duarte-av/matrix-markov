@@ -1,0 +1,17 @@
+services:
+  markov-bot:
+    image: ghcr.io/ricardo-duarte-av/matrix-markov:latest
+    # To build locally instead of pulling: docker compose up --build
+    build: .
+    container_name: matrix-markov
+    restart: unless-stopped
+    # ./data must be writable by this user. Set PUID/PGID (e.g. in a .env file
+    # next to this one) to your host user's `id -u` / `id -g`.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    volumes:
+      - ./config.yaml:/config/config.yaml:ro
+      # markov.db (plaintext messages) + crypto.db (E2EE keys). Keep it private.
+      - ./data:/data
+      # Seed files: paths in config.yaml are relative to /config,
+      # e.g. seed_file: seeds/random.txt
+      # - ./seeds:/config/seeds:ro

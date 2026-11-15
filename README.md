@@ -1,0 +1,85 @@
+# matrix-markov
+
+A Matrix bot that learns how each room talks and replies with Markov-chain text.
+It's written in Go with [mautrix-go](https://github.com/mautrix/go) and supports end-to-end encrypted rooms.
+
+## Features
+
+- **Rooms are kept apart.** Each allowed room has its own chain, built only from that room's messages and its own optional seed file. No chain is shared. Messages from rooms that aren't configured are ignored, and invites to them are rejected.
+- **E2EE.** Uses mautrix's crypto helper. The device and its keys are kept in `data/crypto.db`, so restarts reuse the same device.
+- **Triggers.** The bot replies when:
+  - it is mentioned (via `m.mentions`, its MXID, display name or localpart)
+  - someone replies to one of its messages
+  - a configured keyword appears
+  - a random draw against `reply_chance` hits
+- **Configurable N-order.** Set it globally or per room. Changing it only needs a restart, because the chain is rebuilt from the stored raw messages.
+
+## Build and run
+
+Needs Go 1.26 or newer (`GOTOOLCHAIN=auto` fetches it automatically) and a C compiler (for SQLite).
+
+```sh
+cp config.example.yaml config.yaml   # then edit it
+go build -tags goolm -o markov-bot .
+./markov-bot -config config.yaml
+```
+
+`-tags goolm` uses the pure-Go olm implementation. Without the tag, the bot links against the system `libolm`, which is deprecated.
+
+Invite the bot to each configured room, or make the room public, and it joins.
+
+### Docker
+
+CI builds and pushes `ghcr.io/ricardo-duarte-av/matrix-markov` on every push, for linux/amd64 and linux/arm64. The tags are:
+
+- branch name
+- `sha-<commit>`
+- `latest` (default branch)
+- semver (for `v*` tags)
+
+```sh
+cp config.example.yaml config.yaml   # then edit it
+mkdir -p data
+echo "PUID=$(id -u)" > .env && echo "PGID=$(id -g)" >> .env
+docker compose up -d                 # or: docker compose up -d --build
+```
+
+The compose file mounts:
+
+- `./config.yaml` at `/config/config.yaml` (read-only)
+- `./data` at `/data`. The container ignores `data_dir` from the config and uses `/data` (it passes `-data-dir /data`).
+
+Seed file paths are relative to `/config`. To use seed files, uncomment the `./seeds` volume in the compose file.
+
+## Corpus and storage
+
+- Each room learns from messages sent **after the bot joined**. It can't decrypt older history in encrypted rooms.
+- `seed_file` is plain text, for example a book from Project Gutenberg. It is split into sentences and loaded into the chain at startup, so the bot can talk from day one. Seed text is never written to the database. Pointing several rooms at the same seed file is fine, since it isn't room text.
+- Learned messages are stored in `data/markov.db`, table `messages(event_id, room_id, sender, body, ts)`. Before storing, the bot strips reply quotes, URLs and Matrix IDs, so it never pings anyone.
+- To forget a room:
+
+  ```sh
+  sqlite3 data/markov.db "DELETE FROM messages WHERE room_id='!id:server'"
+  ```
+
+  Then restart the bot.
+
+**Privacy:** `markov.db` holds **plaintext** copies of messages from encrypted rooms. `crypto.db` holds the bot's private keys. Both files are created with mode `0600`. Protect `data/` accordingly.
+
+## Choosing the order
+
+| order | behaviour |
+|------:|-----------|
+| 1 | Mostly word salad. |
+| 2 | **Default.** Good mix of coherence and novelty for chat-sized corpora. |
+| 3+ | Very coherent, but it mostly repeats whole messages unless the room has tens of thousands of them. |
+
+The generator avoids sending an exact copy of a learned message when it can.
+
+## Tests
+
+```sh
+go test -tags goolm ./...
+```
+
+`internal/bot/isolation_test.go` feeds two rooms disjoint vocabularies and seed files. It then generates 4,000 replies, including replies prompted with the other room's text, and asserts that no foreign token ever appears.

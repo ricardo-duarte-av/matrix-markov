@@ -1,0 +1,33 @@
+# Copy to config.yaml and edit. config.yaml is git-ignored (it holds a password).
+
+homeserver: https://matrix.example.org
+username: markovbot              # localpart or full MXID (@markovbot:example.org)
+password: "change-me"
+# Encrypts the E2EE keys stored in data_dir/crypto.db. Use a long random
+# string (e.g. `openssl rand -hex 32`) and never change it afterwards, or the
+# bot loses access to its keys.
+pickle_key: "change-me-to-a-long-random-string"
+device_name: Markov Bot
+data_dir: ./data                 # markov.db + crypto.db; relative to this file
+log_level: info                  # trace, debug, info, warn, error
+
+# Global defaults. Every key marked (room) can be overridden per room.
+markov:
+  order: 2                       # (room) words of context; 1 = chaotic, 3+ = parrots unless huge corpus
+  min_words: 3
+  max_words: 30
+  reply_chance: 0.02             # (room) probability of answering any message, 0..1
+  keywords: ["markov"]           # (room) case-insensitive whole words/phrases that trigger a reply
+  seed_file: ""                  # (room) plain-text file loaded into each room's chain at startup
+  max_messages: 50000            # per-room stored-message cap, oldest pruned; 0 = unlimited
+
+# Only these rooms are joined, learned from and answered in. Each room has its
+# own chain: text never moves from one room to another.
+rooms:
+  - id: "!abcdefghijkl:example.org"
+  - id: "#random:example.org"    # aliases are resolved at startup
+    seed_file: seeds/random.txt
+    order: 2
+    reply_chance: 0.1
+    keywords: ["markov", "bot"]
+    learn: true                  # false = only talk from the seed file, never learn
